@@ -14,7 +14,7 @@ Send the `USR1` or `USR2` signal to inspect the process.
 kill -usr1 <golang process pid>
 ```
 
-The default `USR1` profile is [goroutine](https://golang.org/pkg/runtime/pprof/#Profile). `sigprof` will save the result of the profile into timestamped files by default.
+The default `USR1` profile is [goroutine](https://golang.org/pkg/runtime/pprof/#Profile). By default, `sigprof` will save results to timestamped files.
 
 ```bash
 go tool pprof profile-<timestamp>.prof

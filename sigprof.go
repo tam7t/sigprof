@@ -57,15 +57,19 @@ func init() {
 	var usr2 []string
 	var out string
 
-	usr1 = strings.Split(os.Getenv(`USR1_PROF`), ",")
-	if len(usr1) == 0 {
-		usr1 = append(usr1, "goroutine")
+	usr1EnvStr := os.Getenv(`USR1_PROF`)
+	if usr1EnvStr == "" {
+		usr1EnvStr = "goroutine"
 	}
 
-	usr2 = strings.Split(os.Getenv(`USR2_PROF`), ",")
-	if len(usr2) == 0 {
-		usr2 = append(usr2, "heap")
+	usr1 = strings.Split(usr1EnvStr, ",")
+
+	usr2EnvStr := os.Getenv(`USR2_PROF`)
+	if usr2EnvStr == "" {
+		usr2EnvStr = "heap"
 	}
+
+	usr2 = strings.Split(usr2EnvStr, ",")
 
 	out = os.Getenv(`SIG_PROF_OUT`)
 	if out == "" {
@@ -111,7 +115,7 @@ func writer(out string) ProfileWriter {
 	switch out {
 	case "file":
 		file, err := os.Create(fmt.Sprintf("profile-%s.prof", time.Now()))
-		if err != nil {
+		if err == nil {
 			return FileWriter{*file}
 		} else {
 			return StderrWriter{}

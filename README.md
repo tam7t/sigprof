@@ -1,4 +1,6 @@
 # sigprof
+
+[![Join the chat at https://gitter.im/tam7t/sigprof](https://badges.gitter.im/tam7t/sigprof.svg)](https://gitter.im/tam7t/sigprof?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
 Golang package for inspecting running processes. Similar to [net/http/pprof](https://golang.org/pkg/net/http/pprof/) but using `USR1` and `USR2` signals instead of HTTP server routes.
 
 # Usage

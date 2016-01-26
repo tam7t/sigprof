@@ -114,7 +114,7 @@ func lookup(profiles []string, out string) {
 func writer(out string) ProfileWriter {
 	switch out {
 	case "file":
-		file, err := os.Create(fmt.Sprintf("profile-%s.prof", time.Now()))
+		file, err := os.Create(fmt.Sprintf("profile-%s.prof", time.Now().Format(time.RFC3339)))
 		if err == nil {
 			return FileWriter{*file}
 		} else {

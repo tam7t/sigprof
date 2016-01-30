@@ -4,25 +4,20 @@ package sigprof
 import (
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime/pprof"
 	"strings"
-	"sync"
 	"syscall"
-	"time"
 )
 
 func init() {
 	s := newSigprof()
 	go s.loop()
 }
-
-var (
-	stopMu   sync.Mutex
-	stopChan = make(chan struct{})
-)
 
 type stderrWriter struct{}
 
@@ -59,10 +54,18 @@ const (
 type sigprof struct {
 	usr1, usr2 []string
 	output     outputType
+
+	writerFactory   func(profile string, output outputType) io.WriteCloser
+	profilerFactory func() profiler
+	sigChanFactory  func() <-chan (os.Signal)
 }
 
 func newSigprof() sigprof {
-	s := sigprof{}
+	s := sigprof{
+		writerFactory:   newWriter,
+		profilerFactory: newProfiler,
+		sigChanFactory:  newSigChan,
+	}
 
 	usr1EnvStr := os.Getenv(`SIGPROF_USR1`)
 	if usr1EnvStr == "" {
@@ -85,18 +88,9 @@ func newSigprof() sigprof {
 	return s
 }
 
-func stop() {
-	stopMu.Lock()
-	if stopChan != nil {
-		close(stopChan)
-		stopChan = nil
-	}
-	stopMu.Unlock()
-}
-
 // loop handles signals and writes profiles.
 func (s *sigprof) loop() {
-	c := newSigChan()
+	c := s.sigChanFactory()
 	for {
 		select {
 		case sig, ok := <-c:
@@ -104,15 +98,11 @@ func (s *sigprof) loop() {
 				return
 			}
 			s.profileSignal(sig)
-		case _, ok := <-stopChan:
-			if !ok {
-				return
-			}
 		}
 	}
 }
 
-var newSigChan = func() <-chan (os.Signal) {
+func newSigChan() <-chan (os.Signal) {
 	c := make(chan os.Signal)
 	signal.Notify(c, syscall.SIGUSR1, syscall.SIGUSR2)
 	return c
@@ -138,19 +128,19 @@ func (s *sigprof) profileSignal(sig os.Signal) {
 
 // writer returns an io.WriteCloser to where the profile should be written.
 func (s *sigprof) writer(profile string) io.WriteCloser {
-	return newWriter(profile, s.output)
+	return s.writerFactory(profile, s.output)
 }
 
-var newWriter = func(profile string, output outputType) io.WriteCloser {
+func newWriter(profile string, output outputType) io.WriteCloser {
 	switch output {
 	case "file":
-		file, err := os.Create(fmt.Sprintf("%s-%s.prof", profile, time.Now()))
+		f, err := ioutil.TempFile("", fmt.Sprintf("%s.%s.prof.", filepath.Base(os.Args[0]), profile))
 		if err != nil {
-			log.Println("failed to create file for %s profile: %v", profile, err)
+			log.Printf("failed to create file for %s profile: %v", profile, err)
 			return stderrWriter{}
-		} else {
-			return file
 		}
+		log.Printf("writing %s profile to %s", profile, f.Name())
+		return f
 	case "stdout":
 		return stdoutWriter{}
 	case "stderr":
@@ -174,13 +164,13 @@ func (pprofiler) writeProfile(w io.Writer, profileName string) error {
 	return p.WriteTo(w, 1)
 }
 
-var newProfiler = func() profiler {
+func newProfiler() profiler {
 	return pprofiler{}
 }
 
 func (s *sigprof) profile(profileName string, w io.WriteCloser) {
 	defer w.Close()
-	p := newProfiler()
+	p := s.profilerFactory()
 	err := p.writeProfile(w, profileName)
 	if err != nil {
 		log.Printf("failed to write %s profile: %v", profileName, err)

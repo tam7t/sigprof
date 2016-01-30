@@ -1,130 +1,188 @@
+// Package sigprof provides signal-triggered profiling.
 package sigprof
 
 import (
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/signal"
 	"runtime/pprof"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
 
-// Interface for writing files
-
-type ProfileWriter interface {
-	Writer() io.Writer
-	Close() error
-}
-
-type StderrWriter struct{}
-
-func (w StderrWriter) Writer() io.Writer {
-	return os.Stderr
-}
-
-func (w StderrWriter) Close() error {
-	return nil
-}
-
-type StdoutWriter struct{}
-
-func (w StdoutWriter) Writer() io.Writer {
-	return os.Stdout
-}
-
-func (w StdoutWriter) Close() error {
-	return nil
-}
-
-type FileWriter struct {
-	file os.File
-}
-
-func (w FileWriter) Writer() io.Writer {
-	return &w.file
-}
-
-func (w FileWriter) Close() error {
-	return w.file.Close()
-}
-
-// Initialize profiler from environment and set defaults
-
 func init() {
-	var usr1 []string
-	var usr2 []string
-	var out string
+	s := newSigprof()
+	go s.loop()
+}
 
-	usr1EnvStr := os.Getenv(`USR1_PROF`)
+var (
+	stopMu   sync.Mutex
+	stopChan = make(chan struct{})
+)
+
+type stderrWriter struct{}
+
+// Write implements io.Writer.
+func (w stderrWriter) Write(p []byte) (int, error) {
+	return os.Stderr.Write(p)
+}
+
+// Close implements io.Closer.
+func (w stderrWriter) Close() error {
+	return nil
+}
+
+type stdoutWriter struct{}
+
+// Write implements io.Writer.
+func (w stdoutWriter) Write(p []byte) (int, error) {
+	return os.Stdout.Write(p)
+}
+
+// Close implements io.Closer.
+func (w stdoutWriter) Close() error {
+	return nil
+}
+
+type outputType string
+
+const (
+	stdoutOutput = outputType("stdout")
+	stderrOutput = outputType("stderr")
+	fileOutput   = outputType("file")
+)
+
+type sigprof struct {
+	usr1, usr2 []string
+	output     outputType
+}
+
+func newSigprof() sigprof {
+	s := sigprof{}
+
+	usr1EnvStr := os.Getenv(`SIGPROF_USR1`)
 	if usr1EnvStr == "" {
 		usr1EnvStr = "goroutine"
 	}
+	s.usr1 = strings.Split(usr1EnvStr, ",")
 
-	usr1 = strings.Split(usr1EnvStr, ",")
-
-	usr2EnvStr := os.Getenv(`USR2_PROF`)
+	usr2EnvStr := os.Getenv(`SIGPROF_USR2`)
 	if usr2EnvStr == "" {
 		usr2EnvStr = "heap"
 	}
+	s.usr2 = strings.Split(usr2EnvStr, ",")
 
-	usr2 = strings.Split(usr2EnvStr, ",")
-
-	out = os.Getenv(`SIG_PROF_OUT`)
-	if out == "" {
-		out = "file"
+	output := os.Getenv(`SIGPROF_OUT`)
+	if output == "" {
+		output = "file"
 	}
+	s.output = outputType(output)
 
-	go profile(usr1, usr2, out)
+	return s
 }
 
-// Wait for profile signal
+func stop() {
+	stopMu.Lock()
+	if stopChan != nil {
+		close(stopChan)
+		stopChan = nil
+	}
+	stopMu.Unlock()
+}
 
-func profile(usr1, usr2 []string, out string) {
+// loop handles signals and writes profiles.
+func (s *sigprof) loop() {
+	c := newSigChan()
+	for {
+		select {
+		case sig, ok := <-c:
+			if !ok {
+				return
+			}
+			s.profileSignal(sig)
+		case _, ok := <-stopChan:
+			if !ok {
+				return
+			}
+		}
+	}
+}
+
+var newSigChan = func() <-chan (os.Signal) {
 	c := make(chan os.Signal)
 	signal.Notify(c, syscall.SIGUSR1, syscall.SIGUSR2)
+	return c
+}
 
-	for {
-		s := <-c
-		switch s {
-		case syscall.SIGUSR1:
-			lookup(usr1, out)
-		case syscall.SIGUSR2:
-			lookup(usr2, out)
-		}
+// profileSignal writes the profiles for the given signal.
+func (s *sigprof) profileSignal(sig os.Signal) {
+	var profiles []string
+	switch sig {
+	case syscall.SIGUSR1:
+		profiles = s.usr1
+	case syscall.SIGUSR2:
+		profiles = s.usr2
+	default:
+		return
+	}
+
+	for _, profile := range profiles {
+		w := s.writer(profile)
+		s.profile(profile, w)
 	}
 }
 
-// Perform profile and write to `out` ProfileWriter
-
-func lookup(profiles []string, out string) {
-	for _, profileName := range profiles {
-		w := writer(out)
-		p := pprof.Lookup(profileName)
-		if p != nil {
-			p.WriteTo(w.Writer(), 1)
-		}
-		w.Close()
-	}
+// writer returns an io.WriteCloser to where the profile should be written.
+func (s *sigprof) writer(profile string) io.WriteCloser {
+	return newWriter(profile, s.output)
 }
 
-// Build ProfileWriter to use for dumping the prof info
-
-func writer(out string) ProfileWriter {
-	switch out {
+var newWriter = func(profile string, output outputType) io.WriteCloser {
+	switch output {
 	case "file":
-		file, err := os.Create(fmt.Sprintf("profile-%s.prof", time.Now()))
-		if err == nil {
-			return FileWriter{*file}
+		file, err := os.Create(fmt.Sprintf("%s-%s.prof", profile, time.Now()))
+		if err != nil {
+			log.Println("failed to create file for %s profile: %v", profile, err)
+			return stderrWriter{}
 		} else {
-			return StderrWriter{}
+			return file
 		}
 	case "stdout":
-		return StdoutWriter{}
+		return stdoutWriter{}
 	case "stderr":
-		return StderrWriter{}
+		return stderrWriter{}
 	default:
-		return StderrWriter{}
+		return stderrWriter{}
+	}
+}
+
+type profiler interface {
+	writeProfile(w io.Writer, profileName string) error
+}
+
+type pprofiler struct{}
+
+func (pprofiler) writeProfile(w io.Writer, profileName string) error {
+	p := pprof.Lookup(profileName)
+	if p == nil {
+		return fmt.Errorf("failed to lookup profile %q", profileName)
+	}
+	return p.WriteTo(w, 1)
+}
+
+var newProfiler = func() profiler {
+	return pprofiler{}
+}
+
+func (s *sigprof) profile(profileName string, w io.WriteCloser) {
+	defer w.Close()
+	p := newProfiler()
+	err := p.writeProfile(w, profileName)
+	if err != nil {
+		log.Printf("failed to write %s profile: %v", profileName, err)
 	}
 }
